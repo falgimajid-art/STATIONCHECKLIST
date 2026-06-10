@@ -1085,11 +1085,12 @@ function renderHistory(sc) {
             selSt.appendChild(o);
         });
     }
-    selSt.onchange = function(){ state.adminStation=this.value; renderHistoryShifts(node); };
+    selSt.onchange = function(){ state.adminStation=this.value; renderHistoryShifts(document.getElementById('screens')); };
 
     var dateIn = node.getElementById('adminDate');
     dateIn.value = state.adminDate;
-    dateIn.onchange = function(){ state.adminDate=this.value; renderHistoryShifts(node); };
+    dateIn.onchange = function(){ state.adminDate=this.value; renderHistoryShifts(document.getElementById('screens')); };
+    dateIn.oninput  = function(){ state.adminDate=this.value; renderHistoryShifts(document.getElementById('screens')); };
 
     sc.appendChild(node);
     renderHistoryShifts(document.getElementById('screens'));
