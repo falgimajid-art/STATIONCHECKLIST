@@ -1,5 +1,6 @@
 
 
+
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
@@ -7,6 +8,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>STATION CHECK LIST</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <style>
         :root {
@@ -851,9 +853,88 @@ function kpi(st) {
     if(!sys.length) return 0;
     return Math.round(sys.filter(s=>isChecked(s,st)).length/sys.length*100);
 }
-// ════════ SUPABASE CONFIG ════════
+// ════════ SUPABASE CONFIG + REALTIME ════════
 var SUPA_URL = 'https://cbfiebsytdsmpjzigawr.supabase.co';
 var SUPA_KEY = 'sb_publishable_lzd3m9XLUrUzxAQPG_pxGA_fFRBZunt';
+
+// إنشاء Supabase client يدعم Realtime
+var supaClient = null;
+if (window.supabase) {
+    supaClient = window.supabase.createClient(SUPA_URL, SUPA_KEY);
+}
+
+// متغير لحفظ channel الـ Realtime الحالي
+var realtimeChannel = null;
+
+// ── إشعار التحديث المباشر ──────────────────────────────────────────────────
+function showSyncToast(msg) {
+    var existing = document.getElementById('syncToast');
+    if (existing) existing.remove();
+    var toast = document.createElement('div');
+    toast.id = 'syncToast';
+    toast.style.cssText = 'position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:linear-gradient(135deg,#003B5C,#0077B6);color:white;padding:10px 18px;border-radius:30px;font-size:11px;font-weight:700;z-index:9999;box-shadow:0 4px 20px rgba(0,59,92,.35);font-family:IBM Plex Sans Arabic,sans-serif;display:flex;align-items:center;gap:7px;animation:fadeUp .3s ease;';
+    toast.innerHTML = '🔄 ' + (msg || 'تم تحديث البيانات من مستخدم آخر');
+    document.body.appendChild(toast);
+    setTimeout(function(){ if(toast.parentNode) toast.remove(); }, 3000);
+}
+
+// ── بدء الاستماع Realtime لمحطة + تاريخ معين ──────────────────────────────
+function startRealtimeSync(station, date) {
+    if (!supaClient) return;
+    // إلغاء الاشتراك القديم إن وجد
+    if (realtimeChannel) {
+        supaClient.removeChannel(realtimeChannel);
+        realtimeChannel = null;
+    }
+    realtimeChannel = supaClient
+        .channel('checklist-' + station + '-' + date)
+        .on('postgres_changes', {
+            event: '*',
+            schema: 'public',
+            table: 'wtc_checklist',
+            filter: 'station=eq.' + station
+        }, function(payload) {
+            var rec = payload.new || payload.old;
+            // تجاهل إذا التاريخ مختلف
+            if (!rec || rec.date !== date) return;
+            var newEntry = {
+                station: rec.station, system: rec.system, shift: rec.shift,
+                date: rec.date, time: rec.time, status: rec.status,
+                note: rec.note, operator: rec.op_id, line: rec.line, images: []
+            };
+            if (payload.eventType === 'DELETE') {
+                state.logs = state.logs.filter(function(l){
+                    return !(l.station===newEntry.station && l.system===newEntry.system &&
+                             l.shift===newEntry.shift && l.date===newEntry.date);
+                });
+            } else {
+                // INSERT أو UPDATE
+                var idx = state.logs.findIndex(function(l){
+                    return l.station===newEntry.station && l.system===newEntry.system &&
+                           l.shift===newEntry.shift && l.date===newEntry.date;
+                });
+                if (idx >= 0) state.logs[idx] = newEntry;
+                else state.logs.unshift(newEntry);
+            }
+            // تحديث الواجهة إذا المستخدم في شاشة الأنظمة أو السجل
+            if (state.screen === 'systems' || state.screen === 'history') {
+                showSyncToast('📡 تحديث مباشر من ' + (rec.op_id || 'مشغل آخر'));
+                render();
+            }
+        })
+        .subscribe(function(status){
+            if (status === 'SUBSCRIBED') {
+                console.log('✅ Realtime متصل:', station, date);
+            }
+        });
+}
+
+// ── إيقاف الـ Realtime عند تسجيل الخروج ──────────────────────────────────
+function stopRealtimeSync() {
+    if (!supaClient || !realtimeChannel) return;
+    supaClient.removeChannel(realtimeChannel);
+    realtimeChannel = null;
+}
 
 function supaHeaders() {
     return {
@@ -896,7 +977,6 @@ function loadLogsFromSupabase(station, date, callback) {
     fetch(url, { headers: supaHeaders() })
     .then(function(r){ return r.json(); })
     .then(function(rows){
-        // map DB columns back to local entry format
         var logs = rows.map(function(r){
             return { station:r.station, system:r.system, shift:r.shift, date:r.date,
                      time:r.time, status:r.status, note:r.note, operator:r.op_id, line:r.line, images:[] };
@@ -966,6 +1046,8 @@ function renderSelect(sc) {
 }
 
 function renderSystems(sc) {
+    // بدء الاستماع Realtime لهذه المحطة والتاريخ
+    startRealtimeSync(state.station, state.date);
     // Load fresh logs from Supabase for current station+date
     loadLogsFromSupabase(state.station, state.date, function(freshLogs){
         // Merge: keep local entries not yet in server, add server entries
@@ -989,7 +1071,7 @@ function _renderSystemsUI(sc) {
     var k = kpi();
     node.getElementById('kpiNum').textContent = k+'%';
     node.getElementById('kpiBar').style.width = k+'%';
-    node.getElementById('btnLogout').onclick = function(){ state.opID=''; state.screen='login'; render(); };
+    node.getElementById('btnLogout').onclick = function(){ stopRealtimeSync(); state.opID=''; state.screen='login'; render(); };
     node.getElementById('btnSync').onclick = function(){ if(confirm('هل أنت متأكد من إرسال التقرير النهائي؟')) alert('🔄 تم إرسال التقرير بنجاح!'); };
 
     var list = node.getElementById('systemsList');
@@ -1072,6 +1154,8 @@ function renderAdminSelect(sc) {
 
 function renderHistory(sc) {
     sc.style.background = ''; sc.style.minHeight = '';
+    // بدء Realtime للمشرف على المحطة المختارة
+    startRealtimeSync(state.adminStation, state.adminDate);
     var node = cloneTemplate('tpl-history');
     node.getElementById('btnBackAdmin').onclick = function(){ state.screen='adminSel'; render(); };
 
